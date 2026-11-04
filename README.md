@@ -1,5 +1,17 @@
 # 麦麦刷B站（MaiBot 插件）
 
+> **本仓库是 fork，相对上游做了以下改动**（上游：[TommyAAKK/maibot-bilibili-interest-share](https://github.com/TommyAAKK/maibot-bilibili-interest-share)）
+>
+> | 版本 | 改动 | 说明 |
+> | --- | --- | --- |
+> | `fe907a8` | 插件推送同步进会话历史 | `send.text` 加上 `sync_to_maisaka_history=True` 与 `maisaka_source_kind="guided_reply"`。原先插件直发的消息只落 `mai_messages`、不进运行时历史，模型会否认自己发过；宿主不支持这两个参数时自动降级为基础调用 |
+> | `2.1.0` | **B 站评论（新功能）** | 对已入选的视频发一条一级评论：默认全关，`publish_enabled=false` 时只出草稿；四道闸（素材充足度 → 依据回查 → 硬规则 → 额度/间隔/时段）；`-412` 风控与登录失效自动熔断 |
+> | `2.1.1` | 审阅修复 | Cookie 不再进日志（只记指纹）、模型空输出不再算「内容不合格」、`code=0` 一律视为已发布、单字隐私词按独立出现判定、暂停分视频级/账号级、`OP/ED` 按词边界匹配 |
+>
+> **升级方式**：直接覆盖插件目录即可；逐条改动与升级说明见 [CHANGELOG.md](CHANGELOG.md)。配置节 `[comment]` 全部有默认值，旧配置可原样使用。
+> **测试**：`pytest tests` → 279 passed, 2 skipped。
+> **与上游同步**：`gh repo sync marvin-aaa/maibot-bilibili-interest-share -b main`，冲突集中在 `plugin.py` 的分享循环与 `config.py` 的配置节。
+
 [![version](https://img.shields.io/badge/version-2.1.1-ff69b4)](CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![platform](https://img.shields.io/badge/platform-MaiBot-00a1d6)](https://github.com/MaiBot-chan/MaiBot)
