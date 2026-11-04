@@ -39,6 +39,9 @@ _DANMAKU_COPY_MIN_CHARS = 12
 # 给 1200 仍可能被截断，所以默认给 2000，重试时再翻到 3500。
 _DRAFT_MAX_TOKENS = 2000
 _DRAFT_RETRY_MAX_TOKENS = 3500
+# 评论正文固定走 replyer 任务（人设说话的模型）：判断视频值不值得分享仍用
+# [interest].llm_task_name（默认 planner），只有「写正文」这一步换模型。
+_DRAFT_TASK_NAME = "replyer"
 
 _URL_RE = re.compile(r"(https?://|www\.|b23\.tv|bilibili\.com|BV[0-9A-Za-z]{10})", re.I)
 _MENTION_RE = re.compile(r"[@＠]\S")
@@ -426,7 +429,9 @@ class CommentService:
         draft: Optional[Dict[str, Any]] = None
         ok, reason, body = (False, "unparsable", "")
         for attempt in range(2):
-            text = await self._judge.generate_text(call_prompt, max_tokens=budget)
+            text = await self._judge.generate_text(
+                call_prompt, task_name=_DRAFT_TASK_NAME, max_tokens=budget
+            )
             if not (text or "").strip():
                 # 推理模型把预算吃光时正文会是空的：加大预算再试一次
                 logger.warning(

@@ -6,6 +6,7 @@
 > | --- | --- | --- |
 > | `fe907a8` | 插件推送同步进会话历史 | `send.text` 加上 `sync_to_maisaka_history=True` 与 `maisaka_source_kind="guided_reply"`。原先插件直发的消息只落 `mai_messages`、不进运行时历史，模型会否认自己发过；宿主不支持这两个参数时自动降级为基础调用 |
 > | `2.1.0` | **B 站评论（新功能）** | 对已入选的视频发一条一级评论：默认全关，`publish_enabled=false` 时只出草稿；四道闸（素材充足度 → 依据回查 → 硬规则 → 额度/间隔/时段）；`-412` 风控与登录失效自动熔断 |
+> | `2.1.4` | 正文改用 replyer | 评论正文固定由 `replyer` 任务的模型生成（判断仍用 `planner`），语气更连贯 |
 > | `2.1.3` | 标题可作依据 | 模型引用视频标题写评论时不再被判成「证据不匹配」 |
 > | `2.1.2` | 草稿预算修复 | 实测预览报「未通过（llm_unavailable）」：推理模型把 `max_tokens=400` 全用在思考上、正文为空。改为默认 2000 并在空输出/截断时翻倍重试；新增 `[comment].draft_max_tokens` |
 > | `2.1.1` | 审阅修复 | Cookie 不再进日志（只记指纹）、模型空输出不再算「内容不合格」、`code=0` 一律视为已发布、单字隐私词按独立出现判定、暂停分视频级/账号级、`OP/ED` 按词边界匹配 |
@@ -14,7 +15,7 @@
 > **测试**：`pytest tests` → 279 passed, 2 skipped。
 > **与上游同步**：`gh repo sync marvin-aaa/maibot-bilibili-interest-share -b main`，冲突集中在 `plugin.py` 的分享循环与 `config.py` 的配置节。
 
-[![version](https://img.shields.io/badge/version-2.1.3-ff69b4)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-2.1.4-ff69b4)](CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![platform](https://img.shields.io/badge/platform-MaiBot-00a1d6)](https://github.com/MaiBot-chan/MaiBot)
 [![python](https://img.shields.io/badge/python-3.10%2B-3776ab)](https://www.python.org/)
@@ -23,7 +24,7 @@
 
 插件会读视频的标签、字幕、弹幕和热门评论，必要时**下载视频抽几帧看画面**，再让 LLM 判断「这视频到底讲了什么、值不值得分享」，最后用**符合人设口吻的自然语言**说出来，像群友随口安利那样。
 
-> 当前版本 **v2.1.3** · 全部配置项已中文化 · 支持手机扫码登录 B 站 · 可选给视频发评论（默认只出草稿）
+> 当前版本 **v2.1.4** · 全部配置项已中文化 · 支持手机扫码登录 B 站 · 可选给视频发评论（默认只出草稿）
 > 逐版本变更见 [CHANGELOG.md](CHANGELOG.md) · 从 1.x 升级请先看[升级说明](#从-1x-升级到-20)
 
 ## 目录
@@ -175,7 +176,7 @@ auto_interests = []                  # 自动提取的兴趣，插件会自己�
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
 | `enabled` | `true` | 是否启用插件（`false` 时完全不工作） |
-| `config_version` | `"2.1.3"` | 配置版本号，由插件维护，一般不要手动改 |
+| `config_version` | `"2.1.4"` | 配置版本号，由插件维护，一般不要手动改 |
 
 ### `[schedule]` 刷取频率
 

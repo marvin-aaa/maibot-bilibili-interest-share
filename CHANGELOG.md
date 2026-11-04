@@ -5,6 +5,12 @@
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 `_manifest.json` 的 `version` 与 `config.py` 里的 `config_version` 始终一致。
 
+## [2.1.4] - 2026-11-04
+
+### 变更
+
+- **评论正文固定用 replyer 模型生成**。判断视频值不值得分享仍然走 `[interest].llm_task_name`（默认 `planner`），只有「写正文」这一步切到 `replyer`：这个任务本来就是负责按人设说话的模型，语气更连贯，也免掉了判断模型长思考把输出预算吃光的问题。
+
 ## [2.1.3] - 2026-11-04
 
 第二轮实测暴露的问题：标题被当成「不存在的依据」。

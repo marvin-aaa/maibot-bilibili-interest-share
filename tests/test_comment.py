@@ -159,6 +159,7 @@ class FakeJudge:
         self.identity_terms = list(identity_terms or [])
         self.empty = empty
         self.budgets: List[int] = []
+        self.task_names: List[str] = []
 
     def persona_block(self) -> str:
         return "人设：安静的记录者"
@@ -169,6 +170,7 @@ class FakeJudge:
     async def generate_text(self, prompt, *, task_name: str = "", max_tokens: int = 800) -> str:
         self.calls += 1
         self.budgets.append(max_tokens)
+        self.task_names.append(task_name)
         if self.empty:
             return ""
         return json.dumps(self.payload, ensure_ascii=False)
@@ -431,3 +433,13 @@ def test_title_can_be_cited_as_evidence() -> None:
     draft = {"text": "这个测试视频讲得挺细，回头还想再看一遍。", "evidence": ["一个测试视频"]}
     ok, reason, _ = validate_draft(draft, _evidence())
     assert ok, reason
+
+
+@pytest.mark.asyncio
+async def test_comment_body_uses_replyer_task(tmp_path) -> None:
+    """评论正文固定走 replyer，不用判断用的 planner。"""
+
+    judge = FakeJudge()
+    service, _ = _service(tmp_path, cfg=_cfg(publish_enabled=False), judge=judge)
+    await service.maybe_comment(FakeVideo(), _evidence())
+    assert judge.task_names and all(name == "replyer" for name in judge.task_names)
