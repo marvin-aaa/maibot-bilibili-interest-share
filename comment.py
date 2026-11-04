@@ -28,7 +28,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger("plugin.bilibili_interest_share.comment")
 
-# 平台侧硬限制：单条评论 1000 字，这里默认 160（够说清一句，也不像刷屏）
+# 平台上限是 1000 字；160 是本插件的产品选择（够说清一句，也不像刷屏）
 _MAX_COMMENT_CHARS = 160
 # 短评论可以没有任何事实引用（纯反应），长评论必须给得出依据
 _EVIDENCE_FREE_MAX_CHARS = 60
@@ -74,6 +74,18 @@ def _norm(text: str) -> str:
     """去掉空白与标点，只留文字与数字，用于依据回查。"""
 
     return re.sub(r"[\s\W_]+", "", (text or "").lower())
+
+
+def _privacy_hit(term: str, text: str) -> bool:
+    """隐私词命中判定：两个字符以上按子串；单字只在该字独立出现时命中。"""
+
+    term = (term or "").strip()
+    if not term:
+        return False
+    if len(term) >= 2:
+        return term in (text or "")
+    pattern = rf"(?<![\u4e00-\u9fff]){re.escape(term)}(?![\u4e00-\u9fff])"
+    return re.search(pattern, text or "") is not None
 
 
 @dataclass
@@ -239,7 +251,7 @@ def validate_draft(
     blocked += [w for w in extra_block_words if w and w.lower() in lowered]
     if blocked:
         return False, f"blocked_words({','.join(blocked[:3])})", text
-    privacy = [w for w in privacy_words if w and w in text]
+    privacy = [w for w in privacy_words if _privacy_hit(w, text)]
     if privacy:
         return False, f"privacy_words({','.join(privacy[:3])})", text
 
@@ -249,8 +261,8 @@ def validate_draft(
     source = _norm(evidence.source_text())
     for item in claimed:
         needle = _norm(item)
-        if len(needle) < 4:
-            continue
+        if len(needle) < 2:
+            return False, f"evidence_too_short({_clip(item, 12)})", text
         if needle not in source:
             return False, f"evidence_mismatch({_clip(item, 20)})", text
     if len(text) > _EVIDENCE_FREE_MAX_CHARS and not claimed:
@@ -361,6 +373,20 @@ class CommentService:
 
     # -- 生成 ----------------------------------------------------------
 
+    @staticmethod
+    def _transient_result(score01: float = 1.0, dry_run: bool = False) -> Dict[str, Any]:
+        """瞬时故障（模型掉线/超时/空输出）：不落库，下一轮还能重试。"""
+
+        return {
+            "ok": False,
+            "reason": "llm_unavailable",
+            "text": "",
+            "evidence": [],
+            "score": round(float(score01), 3),
+            "dry_run": dry_run,
+            "transient": True,
+        }
+
     async def compose(
         self,
         video: Any,
@@ -385,6 +411,9 @@ class CommentService:
             max_chars=int(cfg.max_chars),
         )
         text = await self._judge.generate_text(prompt, max_tokens=400)
+        if not (text or "").strip():
+            logger.warning("评论草稿生成失败：模型没有输出 %s", getattr(video, "bvid", ""))
+            return self._transient_result(score01, dry_run)
         draft = parse_draft(text)
         privacy_terms = self._privacy_terms()
         ok, reason, body = (False, "unparsable", "")
@@ -403,6 +432,11 @@ class CommentService:
                 + f"\n\n上一次的草稿不合格，原因：{reason}。请据此重写，仍然只输出 JSON。"
             )
             text = await self._judge.generate_text(retry_prompt, max_tokens=400)
+            if not (text or "").strip():
+                logger.warning(
+                    "评论草稿重试仍无输出 %s", getattr(video, "bvid", "")
+                )
+                return self._transient_result(score01, dry_run)
             draft = parse_draft(text)
             if draft is not None:
                 ok, reason, body = validate_draft(
@@ -419,6 +453,7 @@ class CommentService:
             "evidence": list((draft or {}).get("evidence") or []),
             "score": round(float(score01), 3),
             "dry_run": dry_run,
+            "transient": False,
         }
         logger.info(
             "评论草稿 %s：ok=%s reason=%s len=%s",
@@ -461,6 +496,10 @@ class CommentService:
             draft = await self.compose(video, evidence, score01=score01)
             published = bool(getattr(cfg, "publish_enabled", False))
             if not draft.get("ok"):
+                if draft.get("transient"):
+                    # 模型不可用不是「内容不合格」，不能写进已处理名单，
+                    # 否则该视频 30 天内都不会再被评论。
+                    return {"status": "skip", "reason": "llm_unavailable"}
                 self._store.mark_comment_result(
                     bvid,
                     status="rejected",
@@ -518,19 +557,24 @@ class CommentService:
                 bvid, status="unknown", text=text, reason=str(exc)[:120],
                 stream_id=stream_id, published=False,
             )
-            self._store.set_comment_pause("send_unknown")
+            self._store.set_comment_pause("send_unknown", bvid=bvid)
             self._store.save()
             return {"status": "unknown", "reason": str(exc)[:120]}
 
         code = int(payload.get("code") or 0)
         rpid = str(payload.get("rpid") or "")
-        if code == 0 and rpid:
+        if code == 0:
+            # code=0 就是平台已接收；rpid 缺失不影响「已发布」的判定，
+            # 否则会走到下面的 code=0 分支把它记成失败，本地与线上状态相反。
             self._store.mark_comment_result(
                 bvid, status="published", text=text, rpid=rpid,
                 stream_id=stream_id, published=True,
             )
             self._store.save()
-            logger.info("评论已发布 %s rpid=%s", bvid, rpid)
+            if rpid:
+                logger.info("评论已发布 %s rpid=%s", bvid, rpid)
+            else:
+                logger.warning("评论已发布但接口未返回 rpid，请人工核对 %s", bvid)
             return {"status": "published", "rpid": rpid}
 
         fatal = _FATAL_CODES.get(code)
@@ -553,6 +597,14 @@ class CommentService:
         return {"status": "rejected", "reason": skip_reason, "code": code}
 
     # -- 手工命令 ------------------------------------------------------
+
+    def blocking_reason(self) -> str:
+        """当前是否有暂停（账号级或视频级）；空串表示没有。"""
+
+        if self._store is None:
+            return ""
+        paused = self._store.comment_pause_reason()
+        return f"paused({paused})" if paused else ""
 
     def pause(self, reason: str = "manual") -> None:
         if self._store is not None:
@@ -580,8 +632,18 @@ class CommentService:
             stream_id=str(record.get("stream_id") or ""),
             published=False,
         )
-        self._store.clear_comment_pause()
+        paused_reason = self._store.comment_pause_reason()
+        paused_for = self._store.comment_pause_bvid()
+        kept = ""
+        if paused_reason:
+            if paused_for and paused_for == str(bvid):
+                self._store.clear_comment_pause()
+            else:
+                # 别的视频造成的暂停，或账号级熔断（风控/登录失效）：不许顺手解
+                kept = paused_reason
         self._store.save()
+        if kept:
+            return {"ok": True, "bvid": bvid, "pause_kept": kept}
         return {"ok": True, "bvid": bvid}
 
     def status_text(self) -> str:

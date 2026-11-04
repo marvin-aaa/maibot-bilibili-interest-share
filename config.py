@@ -42,7 +42,7 @@ class PluginSectionConfig(PluginConfigBase):
         json_schema_extra={"label": "启用插件"},
     )
     config_version: str = Field(
-        default="2.1.0",
+        default="2.1.1",
         description="配置版本（由插件维护，请勿手动修改）",
         json_schema_extra={"label": "配置版本"},
     )
@@ -538,7 +538,10 @@ class FilterConfig(PluginConfigBase):
             "概念片", "实机演示", "OP", "ED", "主题曲",
             "前瞻", "速览", "兑换码", "直播回放", "特别节目", "版本更新说明",
         ],
-        description="判定为「主流官方内容」的关键词（命中标题/简介即排除）",
+        description=(
+            "判定为「主流官方内容」的关键词（命中标题/简介即排除）。"
+            "纯英文/数字词按词边界匹配，OP/ED 不会误伤 stop motion、Open World"
+        ),
         json_schema_extra={"label": "官方内容关键词"},
     )
 

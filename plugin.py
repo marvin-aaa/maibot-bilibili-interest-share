@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import math
 import random
@@ -259,6 +260,32 @@ def format_share_header(video: Video) -> str:
     """B 站标准转发格式：【标题】 链接。"""
 
     return f"【{video.title}】 {video.url}"
+
+
+def _cookie_fingerprint(cookie: str) -> str:
+    """日志里用的 Cookie 指纹：只给长度与哈希前 8 位，绝不写原文。"""
+
+    text = (cookie or "").strip()
+    if not text:
+        return "空"
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:8]
+    return f"{len(text)}B/{digest}"
+
+
+# 纯英文/数字关键词（如 OP、ED）按词边界匹配，避免 "stop motion" 命中 "op"。
+_ASCII_KEYWORD_RE = re.compile(r"^[a-z0-9][a-z0-9 ._+#-]*$")
+
+
+def _keyword_hit(token: str, haystack: str) -> bool:
+    """关键词命中判定：中文按子串，纯英文/数字按词边界。"""
+
+    token = (token or "").strip().lower()
+    haystack = (haystack or "").lower()
+    if not token:
+        return False
+    if _ASCII_KEYWORD_RE.match(token):
+        return re.search(rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])", haystack) is not None
+    return token in haystack
 
 
 # ----------------------------------------------------------------------
@@ -796,6 +823,9 @@ class BilibiliInterestSharePlugin(MaiBotPlugin):
         picked: List[Tuple[ScoreResult, Optional[Dict[str, Any]], CommentEvidence]] = []
         for result in results[:max_check]:
             video = result.video
+            # 类别配额先判一次：配额已满就不必抓详情、更不必抽帧
+            if _over_category_cap(result):
+                continue
             danmaku, comments, subtitle = await self._collect_detail(video)
             judged = await self._judge.judge(
                 video,
@@ -1028,10 +1058,9 @@ class BilibiliInterestSharePlugin(MaiBotPlugin):
         return kept
 
     def _is_official(self, video: Video) -> bool:
-        haystack = f"{video.title or ''} {video.description or ''}".lower()
+        haystack = f"{video.title or ''} {video.description or ''}"
         for keyword in self.config.filter.official_keywords or []:
-            token = (keyword or "").strip().lower()
-            if token and token in haystack:
+            if _keyword_hit(str(keyword or ""), haystack):
                 return True
         return False
 
@@ -1559,7 +1588,7 @@ class BilibiliInterestSharePlugin(MaiBotPlugin):
             return False
         try:
             # 同步进 Maisaka 内部历史：否则插件直发的消息只会落库，
-            # 不进 planner 会话历史，模型会否认自己发过（2026-11-04 排查）。
+            # 不进 planner 会话历史，模型会否认自己发过。
             # maisaka_source_kind 必须是 guided_reply，否则宿主不会标记
             # is_self_message=true，历史里会被当成另一个说话人。
             result = await send.text(
@@ -1568,6 +1597,15 @@ class BilibiliInterestSharePlugin(MaiBotPlugin):
                 sync_to_maisaka_history=True,
                 maisaka_source_kind="guided_reply",
             )
+        except TypeError:
+            # 老宿主的 send.text 不接受 Maisaka 的私有 kwarg，降级为基础调用，
+            # 否则整轮分享会静默失败（只是不发历史，评论/分享本身不受影响）。
+            logger.info("宿主 send.text 不接受 Maisaka 参数，改用基础调用（%s）", stream_id)
+            try:
+                result = await send.text(text, stream_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("发送消息失败（%s）：%s", stream_id, exc)
+                return False
         except Exception as exc:  # noqa: BLE001
             logger.warning("发送消息失败（%s）：%s", stream_id, exc)
             return False
@@ -1761,14 +1799,14 @@ class BilibiliInterestSharePlugin(MaiBotPlugin):
             cached = self._store.get(video.bvid)
             if cached and (cached.get("narrative") or cached.get("summary")):
                 # 名单内视频再次分享：直接复用之前的介绍文案，不重新生成
-                await self._send_parts(
+                if await self._send_parts(
                     stream_id,
                     video,
                     str(cached.get("narrative") or cached.get("summary") or ""),
                     kind="reshare",
                     intro=str(cached.get("intro") or ""),
-                )
-                shared.append(video.bvid)
+                ):
+                    shared.append(video.bvid)
                 continue
             danmaku, comments, subtitle = await self._collect_detail(video)
             judged = None
@@ -1849,17 +1887,23 @@ class BilibiliInterestSharePlugin(MaiBotPlugin):
         if not videos:
             return {"ok": False, "reason": "no_candidates"}
 
-        blocked = [item.lower() for item in config.shiwei.block_keywords or []]
-        # 赤石路径也套一层全局屏蔽词，避免把广告/带货/官方预告当整活发出去
-        blocked.extend(item.lower() for item in config.filter.block_keywords or [])
-        if config.filter.exclude_official:
-            blocked.extend(item.lower() for item in config.filter.official_keywords or [])
+        blocked = [item for item in config.shiwei.block_keywords or [] if item]
+        # 赤石路径也套一层全局屏蔽词，避免把广告/带货当整活发出去
+        blocked.extend(item for item in config.filter.block_keywords or [] if item)
+        # 官方物料单独一组：只在 exclude_official 打开时生效，且走词边界（OP/ED 不再误杀）
+        official_terms = (
+            [item for item in config.filter.official_keywords or [] if item]
+            if config.filter.exclude_official
+            else []
+        )
         blocked_up = [item.lower() for item in config.filter.block_up_names or []]
         shiwei_words = [item for item in config.shiwei.keywords if item]
         scored: List[Tuple[float, Video]] = []
         for video in merge_videos([videos]):
-            haystack = f"{video.title} {video.description} {getattr(video, 'tags', '')}".lower()
-            if any(token and token in haystack for token in blocked):
+            haystack = f"{video.title} {video.description} {getattr(video, 'tags', '')}"
+            if any(_keyword_hit(token, haystack) for token in blocked):
+                continue
+            if any(_keyword_hit(token, haystack) for token in official_terms):
                 continue
             if blocked_up and any(name and name in str(getattr(video, "owner", "")).lower() for name in blocked_up):
                 continue
@@ -2073,9 +2117,12 @@ class BilibiliInterestSharePlugin(MaiBotPlugin):
         else:
             text = (
                 f"登录成功{name_part}，但 Cookie 写入配置文件失败，"
-                "请把日志里的 Cookie 手动填到「账号登录」里。"
+                "请重新扫码，或从浏览器里复制 Cookie 填到「账号登录」里。"
             )
-            logger.warning("B 站 Cookie（请手动填入配置）：%s", cookie)
+            logger.warning(
+                "B 站 Cookie 写入配置文件失败（指纹 %s），请重新扫码登录",
+                _cookie_fingerprint(cookie),
+            )
         await self._send_text(stream_id, text)
         logger.info("B 站扫码登录成功%s", name_part)
 
@@ -2218,7 +2265,13 @@ class BilibiliInterestSharePlugin(MaiBotPlugin):
             text = "评论模块未加载。"
         else:
             result = self._comment.ack(bvid)
-            if result.get("ok"):
+            if result.get("ok") and result.get("pause_kept"):
+                text = (
+                    f"已记录核对：{bvid}（该视频不会重发评论）。\n"
+                    f"但评论仍处于暂停状态：{result['pause_kept']}，"
+                    "确认没问题后再发 /bili-comment-resume 恢复。"
+                )
+            elif result.get("ok"):
                 text = f"已解除阻塞：{bvid}（该视频不会重发评论）"
             elif result.get("reason") == "no_record":
                 text = f"没有 {bvid} 的评论记录。"
@@ -2281,7 +2334,7 @@ class BilibiliInterestSharePlugin(MaiBotPlugin):
         ]
         if code and draft.get("ok"):
             lines.append("")
-            lines.append(f"（只是草稿，没有发到 B 站；真要发需要在配置里打开「真的发布」）")
+            lines.append("（只是草稿，没有发到 B 站；真要发需要在配置里打开「真的发布」）")
         return "\n".join(lines)
 
     # -- 文本输出 ------------------------------------------------------

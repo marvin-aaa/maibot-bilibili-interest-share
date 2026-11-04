@@ -127,8 +127,6 @@ def _safe_or_empty(url: str) -> str:
 
 def _as_int(value: Any, default: int = 0) -> int:
     try:
-        if isinstance(value, bool):
-            return int(value)
         return int(value)
     except (TypeError, ValueError):
         return default

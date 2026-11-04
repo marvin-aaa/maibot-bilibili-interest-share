@@ -423,9 +423,8 @@ class SeenStore:
             record["stream_id"] = str(stream_id)
         if published:
             record["published"] = True
-        # 草稿不占用「上次发送时间」，只有真的尝试过发送才计时
-        if status in {"draft", "rejected"} and not text:
-            record.pop("attempted_at", None)
+        # 草稿/被拒不更新 attempted_at：只有 mark_comment_attempt() 才会写它，
+        # 所以这里的记录天然反映「真的尝试发送过」的时刻。
 
     def comment_count_today(self, *, now: Optional[float] = None) -> int:
         """今日已尝试发送的评论条数（跨天自动归零）。"""
@@ -445,11 +444,21 @@ class SeenStore:
     def comment_pause_reason(self) -> str:
         return str(self._meta.get("comment_pause") or "")
 
-    def set_comment_pause(self, reason: str) -> None:
+    def set_comment_pause(self, reason: str, *, bvid: str = "") -> None:
+        """bvid 非空 = 视频级（可 ack 解除）；为空 = 账号级熔断（只能 resume）。"""
+
         self._meta["comment_pause"] = str(reason or "paused")
+        if bvid:
+            self._meta["comment_pause_bvid"] = str(bvid)
+        else:
+            self._meta.pop("comment_pause_bvid", None)
+
+    def comment_pause_bvid(self) -> str:
+        return str(self._meta.get("comment_pause_bvid") or "")
 
     def clear_comment_pause(self) -> None:
         self._meta.pop("comment_pause", None)
+        self._meta.pop("comment_pause_bvid", None)
 
     def recent_comments(self, limit: int = 3) -> List[Dict[str, Any]]:
         """按时间倒序返回最近几条评论记录。"""

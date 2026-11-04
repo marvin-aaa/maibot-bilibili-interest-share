@@ -1,6 +1,6 @@
 # 麦麦刷B站（MaiBot 插件）
 
-[![version](https://img.shields.io/badge/version-2.1.0-ff69b4)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-2.1.1-ff69b4)](CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![platform](https://img.shields.io/badge/platform-MaiBot-00a1d6)](https://github.com/MaiBot-chan/MaiBot)
 [![python](https://img.shields.io/badge/python-3.10%2B-3776ab)](https://www.python.org/)
@@ -9,7 +9,7 @@
 
 插件会读视频的标签、字幕、弹幕和热门评论，必要时**下载视频抽几帧看画面**，再让 LLM 判断「这视频到底讲了什么、值不值得分享」，最后用**符合人设口吻的自然语言**说出来，像群友随口安利那样。
 
-> 当前版本 **v2.1.0** · 全部配置项已中文化 · 支持手机扫码登录 B 站 · 可选给视频发评论（默认只出草稿）
+> 当前版本 **v2.1.1** · 全部配置项已中文化 · 支持手机扫码登录 B 站 · 可选给视频发评论（默认只出草稿）
 > 逐版本变更见 [CHANGELOG.md](CHANGELOG.md) · 从 1.x 升级请先看[升级说明](#从-1x-升级到-20)
 
 ## 目录
@@ -161,7 +161,7 @@ auto_interests = []                  # 自动提取的兴趣，插件会自己�
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
 | `enabled` | `true` | 是否启用插件（`false` 时完全不工作） |
-| `config_version` | `"2.1.0"` | 配置版本号，由插件维护，一般不要手动改 |
+| `config_version` | `"2.1.1"` | 配置版本号，由插件维护，一般不要手动改 |
 
 ### `[schedule]` 刷取频率
 
@@ -484,7 +484,7 @@ max_share_per_round = 0           # 该流每轮最多几个，0 = 用 [schedule
 | `/bili-comment-pause` | — | 暂停评论（视频分享照常） |
 | `/bili-comment-resume` | — | 恢复评论 |
 | `/bili-comment-ack BV号` | — | 人工到 B 站核对「结果未知」的评论后解除阻塞（该视频不会重发） |
-| `/bili-comment-preview BV号` | — | 现场生成一条评论草稿，只看不发 |
+| `/bili-comment-preview BV号` | — | 现场生成一条评论草稿，只看不发（需先打开 `[comment].enabled`） |
 
 ---
 
@@ -556,14 +556,14 @@ github.TommyAAKK.bilibili_interest_share/
 │   ├── live_check.py     # 真实联网自检（可选抽帧/弹幕/LLM/赤石）
 │   ├── probe_persona.py  # 人设自检：打印读到的人设 + 注入后的 prompt（不调模型）
 │   └── probe_vision.py   # 单独验证「下载 + 抽帧」链路
-└── tests/                # unittest 单元测试（255 个用例）
+└── tests/                # 单元测试
 ```
 
 ---
 
 ## 测试与自检
 
-单元测试（239 个用例，不需要联网）：
+单元测试（不需要联网）：
 
 ```powershell
 # 用 MaiBot 所在环境的 python

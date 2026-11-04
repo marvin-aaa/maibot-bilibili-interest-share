@@ -147,10 +147,16 @@ class FakeClient:
 
 
 class FakeJudge:
-    def __init__(self, payload: Optional[Dict[str, Any]] = None, identity_terms: Optional[List[str]] = None):
-        self.payload = payload or {"text": "看着挺有意思，讲得也细", "evidence": []}
+    def __init__(
+        self,
+        payload: Optional[Dict[str, Any]] = None,
+        identity_terms: Optional[List[str]] = None,
+        empty: bool = False,
+    ):
+        self.payload = payload if payload is not None else {"text": "看着挺有意思，讲得也细", "evidence": []}
         self.calls = 0
         self.identity_terms = list(identity_terms or [])
+        self.empty = empty
 
     def persona_block(self) -> str:
         return "人设：安静的记录者"
@@ -160,6 +166,8 @@ class FakeJudge:
 
     async def generate_text(self, prompt, *, task_name: str = "", max_tokens: int = 800) -> str:
         self.calls += 1
+        if self.empty:
+            return ""
         return json.dumps(self.payload, ensure_ascii=False)
 
 
@@ -319,3 +327,75 @@ async def test_configured_privacy_words_are_blocked(tmp_path) -> None:
     result = await service.maybe_comment(FakeVideo(), _evidence())
     assert result["status"] == "rejected"
     assert client.calls == []
+
+
+# ----------------------------------------------------------------------
+# 回归：审阅指出的边界
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_code_zero_without_rpid_is_published(tmp_path) -> None:
+    client = FakeClient(code=0, rpid="")
+    service, store = _service(tmp_path, cfg=_cfg(), client=client)
+    result = await service.maybe_comment(FakeVideo(), _evidence())
+    assert result["status"] == "published"
+    assert store.get_comment("BV1xx411c7mD")["status"] == "published"
+
+
+@pytest.mark.asyncio
+async def test_llm_empty_output_is_transient(tmp_path) -> None:
+    """模型掉线不能被记成「内容不合格」，否则该视频 30 天内不再尝试。"""
+
+    judge = FakeJudge(empty=True)
+    service, store = _service(tmp_path, cfg=_cfg(), judge=judge)
+    result = await service.maybe_comment(FakeVideo(), _evidence())
+    assert result["status"] == "skip" and result["reason"] == "llm_unavailable"
+    assert store.get_comment("BV1xx411c7mD") is None
+    assert judge.calls == 1  # 空输出直接返回，不浪费第二次调用
+
+
+def test_single_char_privacy_term_only_matches_standalone() -> None:
+    ok, reason, _ = validate_draft({"text": "这条鱼养得真好，钓鱼佬狂喜", "evidence": []}, _evidence(), privacy_words=("鱼",))
+    assert ok, reason
+    ok, reason, _ = validate_draft({"text": "鱼！好可爱", "evidence": []}, _evidence(), privacy_words=("鱼",))
+    assert not ok and reason.startswith("privacy_words")
+    ok, reason, _ = validate_draft({"text": "今天小鲸鱼来了", "evidence": []}, _evidence(), privacy_words=("小鲸鱼",))
+    assert not ok and reason.startswith("privacy_words")
+
+
+def test_short_evidence_is_checked() -> None:
+    ok, reason, _ = validate_draft(
+        {"text": "这期讲得真好，回头再看一遍。", "evidence": ["原神"]}, _evidence()
+    )
+    assert not ok and reason.startswith("evidence_mismatch")
+    ok, reason, _ = validate_draft(
+        {"text": "这期讲得真好，回头再看一遍。", "evidence": ["神"]}, _evidence()
+    )
+    assert not ok and reason.startswith("evidence_too_short")
+
+
+def test_keyword_hit_respects_ascii_boundaries() -> None:
+    plugin = load_submodule("plugin")
+    hit = plugin._keyword_hit
+    assert not hit("OP", "stop motion animation")
+    assert not hit("OP", "open world exploration")
+    assert hit("OP", "新番 OP 主题曲")
+    assert not hit("ED", "edited highlights")
+    assert hit("官方", "官方预告片")
+
+
+@pytest.mark.asyncio
+async def test_ack_does_not_clear_account_level_pause(tmp_path) -> None:
+    """风控/登录失效是账号级熔断，ack 一条评论不能顺手解开。"""
+
+    store = SeenStore(tmp_path / "state.json")
+    store.load()
+    client = FakeClient(code=-412)
+    service, _ = _service(tmp_path, cfg=_cfg(), store=store, client=client)
+    await service.maybe_comment(FakeVideo(), _evidence())
+    assert store.comment_pause_reason()
+    result = service.ack("BV1xx411c7mD")
+    assert result["ok"] is True
+    assert result.get("pause_kept")
+    assert store.comment_pause_reason()  # 仍然暂停
