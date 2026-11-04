@@ -5,6 +5,14 @@
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 `_manifest.json` 的 `version` 与 `config.py` 里的 `config_version` 始终一致。
 
+## [2.1.3] - 2026-11-04
+
+第二轮实测暴露的问题：标题被当成「不存在的依据」。
+
+### 修复
+
+- **标题也算可引用素材**：prompt 里把标题给了模型，模型引用标题写评论是合理的，但校验只回查弹幕/热评/字幕/画面/简介/标签，于是 `evidence_mismatch("0操控速度M700用起来能清图吗")` 把草稿判掉。现在 `CommentEvidence` 增加 `title` 字段并计入回查范围。
+
 ## [2.1.2] - 2026-11-04
 
 修复实际测试中暴露的问题：预览评论草稿时报「未通过（llm_unavailable）」，提示里写「模型没给出可用的评论」。

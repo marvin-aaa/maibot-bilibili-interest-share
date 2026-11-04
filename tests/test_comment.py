@@ -46,6 +46,7 @@ def _evidence() -> Any:
         frames_desc="画面是讲解型视频，主讲人坐在书架前",
         description="这是一个用来测试的简介，讲的是某个历史人物的一生。" * 3,
         tags="历史,科普,人物",
+        title="一个测试视频",
     )
 
 
@@ -422,3 +423,11 @@ async def test_empty_then_success_recovers(tmp_path) -> None:
     result = await service.maybe_comment(FakeVideo(), _evidence())
     assert result["status"] == "draft"
     assert judge.budgets[1] > judge.budgets[0]
+
+
+def test_title_can_be_cited_as_evidence() -> None:
+    """prompt 里给了标题，模型引用标题不应该被判成证据不匹配。"""
+
+    draft = {"text": "这个测试视频讲得挺细，回头还想再看一遍。", "evidence": ["一个测试视频"]}
+    ok, reason, _ = validate_draft(draft, _evidence())
+    assert ok, reason

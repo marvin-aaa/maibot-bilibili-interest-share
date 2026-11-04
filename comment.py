@@ -103,6 +103,7 @@ class CommentEvidence:
     frames_desc: str = ""
     description: str = ""
     tags: str = ""
+    title: str = ""
 
     def richness(self, *, min_subtitle: int = 300, min_desc: int = 80, min_danmaku: int = 20) -> int:
         """素材充足度：字幕/简介/弹幕/热评/画面 五项里满足几项。"""
@@ -122,6 +123,9 @@ class CommentEvidence:
 
     def source_text(self) -> str:
         parts: List[str] = []
+        # 标题也要算进可引用素材：prompt 里给了标题，模型自然会引用它
+        if self.title:
+            parts.append(str(self.title))
         parts.extend(str(item) for item in self.danmaku or ())
         parts.extend(str(item) for item in self.comments or ())
         for value in (self.subtitle, self.frames_desc, self.description, self.tags):

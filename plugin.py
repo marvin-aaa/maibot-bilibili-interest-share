@@ -884,6 +884,7 @@ class BilibiliInterestSharePlugin(MaiBotPlugin):
                         frames_desc=str(frames_desc or ""),
                         description=str(getattr(video, "description", "") or ""),
                         tags=str(getattr(video, "tags", "") or ""),
+                        title=str(getattr(video, "title", "") or ""),
                     ),
                 )
             )
@@ -899,6 +900,7 @@ class BilibiliInterestSharePlugin(MaiBotPlugin):
         return CommentEvidence(
             description=str(getattr(video, "description", "") or ""),
             tags=str(getattr(video, "tags", "") or ""),
+            title=str(getattr(video, "title", "") or ""),
         )
 
     async def _collect_detail(self, video: Video) -> Tuple[List[str], List[str], str]:
@@ -2322,6 +2324,7 @@ class BilibiliInterestSharePlugin(MaiBotPlugin):
             subtitle=subtitle,
             description=str(getattr(video, "description", "") or ""),
             tags=str(getattr(video, "tags", "") or ""),
+            title=str(getattr(video, "title", "") or ""),
         )
         draft = await self._comment.compose(video, evidence, dry_run=True)
         lines = [
