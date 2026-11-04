@@ -324,6 +324,42 @@ class LlmJudge:
             self._logger.debug("读取人设失败：%s", exc)
             return ""
 
+    async def generate_text(
+        self,
+        prompt: Any,
+        *,
+        task_name: str = "",
+        max_tokens: int = 800,
+    ) -> str:
+        """对外暴露的纯文本生成（供评论模块复用同一套模型与超时配置）。"""
+
+        return await self._generate(
+            prompt,
+            task_name=(task_name or "").strip() or self.task_name,
+            max_tokens=max_tokens,
+        )
+
+    def persona_identity_terms(self) -> List[str]:
+        """人设里的自称（名字与别名）：公开场合不应当出现这些词。"""
+
+        provider = self._persona_provider
+        if provider is None:
+            return []
+        try:
+            persona = provider.get()
+        except Exception as exc:  # noqa: BLE001 - 读不到人设就不做额外拦截
+            self._logger.debug("读取人设身份失败：%s", exc)
+            return []
+        terms: List[str] = []
+        name = str(getattr(persona, "name", "") or "").strip()
+        if name:
+            terms.append(name)
+        for alias in getattr(persona, "aliases", None) or []:
+            value = str(alias or "").strip()
+            if value and value not in terms:
+                terms.append(value)
+        return terms
+
     async def _generate(
         self,
         prompt: Any,

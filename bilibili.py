@@ -444,6 +444,16 @@ class _BilibiliClientBase:
 
         return str(self._client.headers.get("Cookie") or "")
 
+    def csrf_token(self) -> str:
+        """从 Cookie 里取 ``bili_jct``：B 站所有写接口都要带它做 csrf 校验。"""
+
+        cookie = self.cookie
+        for part in cookie.split(";"):
+            name, _, value = part.strip().partition("=")
+            if name.strip() == "bili_jct":
+                return value.strip()
+        return ""
+
     async def _request_json(self, url: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """发请求并解析 JSON，不校验业务 ``code``。"""
 
@@ -539,6 +549,7 @@ DANMAKU_URL = "https://api.bilibili.com/x/v1/dm/list.so"
 REPLY_URL = "https://api.bilibili.com/x/v2/reply"
 PLAYER_URL = "https://api.bilibili.com/x/player/v2"
 PLAYURL_URL = "https://api.bilibili.com/x/player/playurl"
+REPLY_ADD_URL = "https://api.bilibili.com/x/v2/reply/add"
 
 _DANMAKU_RE = re.compile(r'<d p="([^"]*)"[^>]*>(.*?)</d>', re.S)
 
@@ -819,6 +830,72 @@ class BilibiliDetailMixin:
                     if base:
                         return _safe_or_empty(base.strip())
         return ""
+
+    # -- 写入：发评论 --------------------------------------------------
+
+    async def _post_form(self, url: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        """表单 POST（B 站的写接口都是这种形态），返回原始 JSON。"""
+
+        client = self._client  # type: ignore[attr-defined]
+        headers = {
+            "Referer": BILIBILI_REFERER,
+            "X-Requested-With": "XMLHttpRequest",
+            "Origin": "https://www.bilibili.com",
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+        try:
+            response = await client.post(url, data=data, headers=headers)
+        except httpx.HTTPError as exc:
+            raise BilibiliError(f"请求 B 站失败：{exc}") from exc
+        if response.status_code != 200:
+            raise BilibiliError(f"B 站接口返回 HTTP {response.status_code}")
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise BilibiliError("B 站返回非 JSON 内容") from exc
+        return payload if isinstance(payload, dict) else {}
+
+    async def fetch_self_mid(self) -> int:
+        """取当前登录账号的 mid（未登录返回 0）。"""
+
+        try:
+            payload = await self._get_json(NAV_URL, {})  # type: ignore[attr-defined]
+        except BilibiliError:
+            return 0
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        return _as_int(data.get("mid"))
+
+    async def post_comment(self, aid: int, message: str, *, csrf: str = "") -> Dict[str, Any]:
+        """在视频下发布一条一级评论。
+
+        不在这里判断成功与否：调用方需要按 ``code`` 区分「成功 / 可跳过 /
+        需要暂停」，所以原样返回 ``{code, message, rpid}``。
+        """
+
+        if not aid:
+            return {"code": -1, "message": "缺少 aid", "rpid": ""}
+        text = (message or "").strip()
+        if not text:
+            return {"code": -1, "message": "评论内容为空", "rpid": ""}
+        if not csrf:
+            return {"code": -111, "message": "缺少 csrf（bili_jct）", "rpid": ""}
+        payload = await self._post_form(
+            REPLY_ADD_URL,
+            {
+                "oid": int(aid),
+                "type": 1,
+                "message": text,
+                "plat": 1,
+                "ordering": "heat",
+                "csrf": csrf,
+            },
+        )
+        code = _as_int(payload.get("code"))
+        raw_data = payload.get("data")
+        data: Dict[str, Any] = raw_data if isinstance(raw_data, dict) else {}
+        rpid = _as_str(data.get("rpid_str") or data.get("rpid"))
+        message_text = _as_str(payload.get("message") or payload.get("msg"))
+        return {"code": code, "message": message_text, "rpid": rpid}
 
     async def download_to(self, url: str, dest: Path, *, max_bytes: int = 80 * 1024 * 1024) -> Path:
         """流式下载到本地文件，超过 ``max_bytes`` 时中止。

@@ -1,6 +1,6 @@
 # 麦麦刷B站（MaiBot 插件）
 
-[![version](https://img.shields.io/badge/version-2.0.0-ff69b4)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-2.1.0-ff69b4)](CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![platform](https://img.shields.io/badge/platform-MaiBot-00a1d6)](https://github.com/MaiBot-chan/MaiBot)
 [![python](https://img.shields.io/badge/python-3.10%2B-3776ab)](https://www.python.org/)
@@ -9,7 +9,7 @@
 
 插件会读视频的标签、字幕、弹幕和热门评论，必要时**下载视频抽几帧看画面**，再让 LLM 判断「这视频到底讲了什么、值不值得分享」，最后用**符合人设口吻的自然语言**说出来，像群友随口安利那样。
 
-> 当前版本 **v2.0.0** · 全部配置项已中文化 · 支持手机扫码登录 B 站
+> 当前版本 **v2.1.0** · 全部配置项已中文化 · 支持手机扫码登录 B 站 · 可选给视频发评论（默认只出草稿）
 > 逐版本变更见 [CHANGELOG.md](CHANGELOG.md) · 从 1.x 升级请先看[升级说明](#从-1x-升级到-20)
 
 ## 目录
@@ -33,6 +33,7 @@
   - [`[reshare]` 自然语言重发](#reshare-自然语言重发)
   - [`[shiwei]` 赤石视频](#shiwei-赤石视频)
   - [`[advanced]` 运行参数](#advanced-运行参数)
+  - [`[comment]` B站评论](#comment-b站评论)
   - [`[[streams]]` 白名单聊天流](#streams-白名单聊天流)
 - [指令](#指令)
 - [工作原理](#工作原理)
@@ -160,7 +161,7 @@ auto_interests = []                  # 自动提取的兴趣，插件会自己�
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
 | `enabled` | `true` | 是否启用插件（`false` 时完全不工作） |
-| `config_version` | `"2.0.0"` | 配置版本号，由插件维护，一般不要手动改 |
+| `config_version` | `"2.1.0"` | 配置版本号，由插件维护，一般不要手动改 |
 
 ### `[schedule]` 刷取频率
 
@@ -414,6 +415,28 @@ min_play = 0                     # 该类别最低播放量，0 = 沿用 [filter
 | `max_seen_records` | `3000` | 最多保留多少条已分享记录（超过淘汰最旧的） |
 | `debug` | `false` | 是否输出调试日志（排查问题时打开） |
 
+### `[comment]` B站评论
+
+对已经入选、准备分享的视频，用同一个人设口吻在 B 站视频下写一条**一级评论**。默认全关；即使打开总开关，默认也**只生成草稿不发出去**。
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `enabled` | `false` | 总开关。评论会公开挂在 B 站且本版不支持自动撤回，建议先跑几天草稿 |
+| `publish_enabled` | `false` | 真的发布。关闭时只把草稿写进 `state.json`（`/bili-comment-status` 可查） |
+| `style_prompt` | `""` | 人设之外追加的语气要求，留空则只用 `[persona]` 的设定 |
+| `min_interest` | `0.75` | 兴趣分门槛（0~1，由判断模型的 0~10 分折算），低于它只分享不评论 |
+| `max_chars` | `160` | 单条评论字数上限 |
+| `min_interval_seconds` | `2700` | 两条评论的最小间隔，默认 45 分钟 |
+| `daily_limit` | `10` | 每天最多发几条评论，超了只分享不评论 |
+| `active_hours` | `"09:00-23:00"` | 允许评论的时段，留空表示全天；支持跨午夜 |
+| `min_evidence` | `2` | 素材充足度门槛：字幕/简介/弹幕/热评/画面 五项里至少满足几项，`0` = 不限制 |
+| `require_frames` | `false` | 是否要求抽帧成功才评论（关闭时抽帧失败仍可凭文字素材评论） |
+| `share_when_comment_fails` | `true` | 评论失败或结果未知时，是否照常分享视频 |
+| `privacy_patterns` | `[]` | 评论里绝不能出现的私密称呼；人设里的名字与别名会自动拦截，不用重复填 |
+| `block_patterns` | `[]` | 额外禁用词；内置已拦截链接、@、联系方式、求三连 |
+
+写评论时会按「素材 → 依据 → 硬规则 → 额度」四道闸依次检查：素材太薄不写、模型必须给出能在素材里逐字找到的依据、链接/@/推广话术/私密称呼一律拒绝、最后才看当日额度和最小间隔。发送前先把意图写进状态文件，只发一次写请求；超时或异常记为「结果未知」并暂停评论，需要人工去 B 站核对后用 `/bili-comment-ack BV号` 解除，该视频不会重发。
+
 ### `[[streams]]` 白名单聊天流
 
 想分享到哪个群 / 私聊，就加一段 `[[streams]]`，可以写多段。
@@ -457,6 +480,11 @@ max_share_per_round = 0           # 该流每轮最多几个，0 = 用 [schedule
 | `/bili-test` | — | 预览本轮候选与前 5 名打分，只把预览发回当前会话，**不分享视频** |
 | `/bili-search 关键词` | `/b站搜索` | 主动搜索并分享，受 `search_cooldown_seconds` 冷却；**只在白名单会话里生效** |
 | `/赤石视频` | — | 抓一个抽象整活视频，只发标题+链接；**只在白名单会话里生效** |
+| `/bili-comment-status` | — | 查看评论开关、今日额度、上次发送时间与最近三条记录 |
+| `/bili-comment-pause` | — | 暂停评论（视频分享照常） |
+| `/bili-comment-resume` | — | 恢复评论 |
+| `/bili-comment-ack BV号` | — | 人工到 B 站核对「结果未知」的评论后解除阻塞（该视频不会重发） |
+| `/bili-comment-preview BV号` | — | 现场生成一条评论草稿，只看不发 |
 
 ---
 

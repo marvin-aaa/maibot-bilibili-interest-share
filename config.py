@@ -42,7 +42,7 @@ class PluginSectionConfig(PluginConfigBase):
         json_schema_extra={"label": "启用插件"},
     )
     config_version: str = Field(
-        default="2.0.0",
+        default="2.1.0",
         description="配置版本（由插件维护，请勿手动修改）",
         json_schema_extra={"label": "配置版本"},
     )
@@ -708,6 +708,105 @@ class ShareConfig(PluginConfigBase):
     )
 
 
+class CommentConfig(PluginConfigBase):
+    """B 站评论：给入选视频发一条一级评论。"""
+
+    __ui_label__ = "B站评论"
+    __ui_icon__ = "message"
+    __ui_order__ = 16
+
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "是否允许给入选的视频发评论。默认关闭；评论会公开挂在 B 站、且无法自动撤回，"
+            "建议先保持关闭跑几天草稿，确认质量后再开"
+        ),
+        json_schema_extra={"label": "启用评论"},
+    )
+    publish_enabled: bool = Field(
+        default=False,
+        description=(
+            "是否真的发到 B 站。关闭时只生成草稿写进状态文件（可用 /bili-comment-status 查看），"
+            "不会发出任何写请求"
+        ),
+        json_schema_extra={"label": "真的发布"},
+    )
+    style_prompt: str = Field(
+        default="",
+        description=(
+            "在机器人人设之外追加的语气要求（留空则只用 [人设语气] 里的设定）。"
+            "例如：像个普通网友、少用感叹号、别复述剧情"
+        ),
+        json_schema_extra={"label": "额外语气 Prompt"},
+    )
+    min_interest: float = Field(
+        default=0.75,
+        ge=0.0,
+        le=1.0,
+        description="兴趣分达到多少才考虑评论（0~1，换算自视频判断的 0~10 分）",
+        json_schema_extra={"label": "评论兴趣门槛"},
+    )
+    max_chars: int = Field(
+        default=160,
+        ge=20,
+        le=300,
+        description="单条评论的最大字数",
+        json_schema_extra={"label": "评论字数上限"},
+    )
+    min_interval_seconds: int = Field(
+        default=2700,
+        ge=300,
+        le=86400,
+        description="两次评论之间至少间隔多少秒（默认 2700 = 45 分钟）",
+        json_schema_extra={"label": "最小间隔（秒）"},
+    )
+    daily_limit: int = Field(
+        default=10,
+        ge=1,
+        le=50,
+        description="每天最多发多少条评论（超了就只分享不评论）",
+        json_schema_extra={"label": "每日上限"},
+    )
+    active_hours: str = Field(
+        default="09:00-23:00",
+        description="允许评论的时段，格式 09:00-23:00；留空表示全天",
+        json_schema_extra={"label": "评论时段"},
+    )
+    min_evidence: int = Field(
+        default=2,
+        ge=0,
+        le=5,
+        description=(
+            "素材充足度门槛：字幕/简介/弹幕/热评/画面 五项里至少要满足几项才评论，"
+            "0 = 不限制"
+        ),
+        json_schema_extra={"label": "素材充足度"},
+    )
+    require_frames: bool = Field(
+        default=False,
+        description="是否要求抽帧成功才评论（关闭时抽帧失败仍可凭文字素材评论）",
+        json_schema_extra={"label": "必须有画面"},
+    )
+    share_when_comment_fails: bool = Field(
+        default=True,
+        description="评论失败或被跳过时，是否照常分享视频",
+        json_schema_extra={"label": "评论失败仍分享"},
+    )
+    privacy_patterns: List[str] = Field(
+        default_factory=list,
+        description=(
+            "评论里绝不能出现的私密称呼或身份词（例如私聊里的叫法）。"
+            "机器人人设里的名字与别名会自动拦截，不用在这里重复填"
+        ),
+        json_schema_extra={"label": "隐私词"},
+    )
+    block_patterns: List[str] = Field(
+        default_factory=list,
+        description="评论里禁止出现的额外词（内置已拦截链接/@/联系方式/求三连）",
+        json_schema_extra={"label": "额外禁用词"},
+    )
+
+
 class ReshareConfig(PluginConfigBase):
     """自然语言「再发一遍」。"""
 
@@ -1033,6 +1132,10 @@ class BilibiliInterestShareConfig(PluginConfigBase):
     advanced: AdvancedConfig = Field(
         default_factory=AdvancedConfig,
         description="高级运行参数（数据目录、超时、去重、调试）",
+    )
+    comment: CommentConfig = Field(
+        default_factory=CommentConfig,
+        description="B 站评论（给入选视频发一级评论，默认全关）",
     )
     streams: List[StreamTargetConfig] = Field(
         default_factory=list,

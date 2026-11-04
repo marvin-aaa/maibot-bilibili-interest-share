@@ -41,6 +41,7 @@ from .bilibili_login import (
     render_qrcode_png,
 )
 from .config import BilibiliInterestShareConfig
+from .comment import CommentEvidence, CommentService
 from .config_edit import (
     describe_write_back_state,
     find_config_path,
@@ -277,6 +278,7 @@ class BilibiliInterestSharePlugin(MaiBotPlugin):
         self._store: Optional[SeenStore] = None
         self._frames: Optional[FrameExtractor] = None
         self._judge: Optional[LlmJudge] = None
+        self._comment: Optional[CommentService] = None
         self._persona: Optional[PersonaProvider] = None
         self._data_dir: Optional[Path] = None
         self._allowed_stream_ids: Set[str] = set()
@@ -343,6 +345,12 @@ class BilibiliInterestSharePlugin(MaiBotPlugin):
             vision_task_name=config.vision.task_name,
             temperature=config.interest.llm_temperature,
             persona_provider=self._persona,
+        )
+        self._comment = CommentService(
+            store=self._store,
+            client=self._client,
+            judge=self._judge,
+            config_getter=lambda: self.config,
         )
         self._stream_fallbacks.clear()
         self._stream_overrides.clear()
@@ -412,6 +420,7 @@ class BilibiliInterestSharePlugin(MaiBotPlugin):
                 logger.warning("关闭 HTTP 客户端失败：%s", exc)
         self._client = None
         self._judge = None
+        self._comment = None
         self._persona = None
 
     async def on_config_update(self, scope: str, config_data: Dict[str, Any], version: str) -> None:
@@ -640,7 +649,8 @@ class BilibiliInterestSharePlugin(MaiBotPlugin):
         limit = int(target.max_share_per_round or config.schedule.max_share_per_round or 1)
         picked = await self._pick_candidates(results, profile, limit)
         shared: List[str] = []
-        for result, judged in picked:
+        comment_log: List[Dict[str, Any]] = []
+        for result, judged, evidence in picked:
             narrative_text, intro_text = "", ""
             if judged:
                 narrative_text = str(judged.get("narrative") or "").strip()
@@ -652,6 +662,36 @@ class BilibiliInterestSharePlugin(MaiBotPlugin):
                     else config.share.narrative_max_chars
                 )
                 narrative_text = (result.video.description or "").strip()[:fallback_limit]
+
+            # 先评论、再分享：评论失败/未知时是否继续分享由 [comment].share_when_comment_fails 决定
+            comment_result: Dict[str, Any] = {}
+            if self._comment is not None:
+                comment_result = await self._comment.maybe_comment(
+                    result.video,
+                    evidence,
+                    score01=self._interest_score01(result, judged),
+                    stream_id=stream_id,
+                )
+                if comment_result.get("status") not in {None, "skip"}:
+                    comment_log.append(
+                        {
+                            "bvid": result.video.bvid,
+                            "status": comment_result.get("status"),
+                            "reason": comment_result.get("reason", ""),
+                        }
+                    )
+                blocked = (
+                    comment_result.get("status") in {"paused", "unknown"}
+                    and not config.comment.share_when_comment_fails
+                )
+                if blocked:
+                    logger.info(
+                        "评论状态 %s，按配置跳过本次分享：%s",
+                        comment_result.get("status"),
+                        result.video.bvid,
+                    )
+                    continue
+
             sent = await self._send_parts(
                 stream_id,
                 result.video,
@@ -670,19 +710,47 @@ class BilibiliInterestSharePlugin(MaiBotPlugin):
                 shared.append(result.video.bvid)
         detail["shared"] = len(shared)
         detail["bvids"] = shared
+        detail["comments"] = comment_log
         detail["matched"] = [
             {"bvid": result.video.bvid, "title": result.video.title, "score": round(result.score, 2)}
             for result in results[:6]
         ]
         return detail
 
+    @staticmethod
+    def _interest_score01(result: ScoreResult, judged: Optional[Dict[str, Any]]) -> float:
+        """把 0~10 的兴趣分折算成 0~1，供评论门槛比较。
+
+        判断模型给了 score 就用它（更贴近语义），否则退回规则打分。
+        """
+
+        value: Optional[float] = None
+        if judged:
+            raw = judged.get("score")
+            if raw is not None:
+                try:
+                    value = float(raw)
+                except (TypeError, ValueError):
+                    value = None
+        if value is None:
+            raw = getattr(result, "score", 0.0)
+            try:
+                value = float(raw) if raw is not None else 0.0
+            except (TypeError, ValueError):
+                value = 0.0
+        return max(0.0, min(1.0, float(value) / 10.0))
+
     async def _pick_candidates(
         self,
         results: Sequence[ScoreResult],
         profile: InterestProfile,
         limit: int,
-    ) -> List[Tuple[ScoreResult, Optional[Dict[str, Any]]]]:
-        """用 LLM 语义判断筛选最终入选视频（含抽帧识图）。"""
+    ) -> List[Tuple[ScoreResult, Optional[Dict[str, Any]], CommentEvidence]]:
+        """用 LLM 语义判断筛选最终入选视频（含抽帧识图）。
+
+        返回三元组：``(打分结果, 判断结果, 评论素材)``。评论素材在这里一并带出，
+        避免为发评论把弹幕/热评/字幕再抓一遍。
+        """
 
         config = self.config
         limit = max(1, int(limit))
@@ -707,11 +775,17 @@ class BilibiliInterestSharePlugin(MaiBotPlugin):
                 per_category[name] = per_category.get(name, 0) + 1
 
         if not config.interest.use_llm_judge or self._judge is None or not self._judge.available:
-            simple: List[Tuple[ScoreResult, Optional[Dict[str, Any]]]] = []
+            simple: List[Tuple[ScoreResult, Optional[Dict[str, Any]], CommentEvidence]] = []
             for result in results:
                 if _over_category_cap(result):
                     continue
-                simple.append((result, None))
+                simple.append(
+                    (
+                        result,
+                        None,
+                        self._evidence_from_video(result.video),
+                    )
+                )
                 _count_category(result)
                 if len(simple) >= limit:
                     break
@@ -719,7 +793,7 @@ class BilibiliInterestSharePlugin(MaiBotPlugin):
 
         interests = [term for term, _weight in profile.sorted_terms()[:10]]
         max_check = max(limit, int(config.interest.llm_max_candidates or 0), 1)
-        picked: List[Tuple[ScoreResult, Optional[Dict[str, Any]]]] = []
+        picked: List[Tuple[ScoreResult, Optional[Dict[str, Any]], CommentEvidence]] = []
         for result in results[:max_check]:
             video = result.video
             danmaku, comments, subtitle = await self._collect_detail(video)
@@ -769,11 +843,33 @@ class BilibiliInterestSharePlugin(MaiBotPlugin):
 
             if _over_category_cap(result):
                 continue
-            picked.append((result, judged))
+            picked.append(
+                (
+                    result,
+                    judged,
+                    CommentEvidence(
+                        danmaku=list(danmaku),
+                        comments=list(comments),
+                        subtitle=str(subtitle or ""),
+                        frames_desc=str(frames_desc or ""),
+                        description=str(getattr(video, "description", "") or ""),
+                        tags=str(getattr(video, "tags", "") or ""),
+                    ),
+                )
+            )
             _count_category(result)
             if len(picked) >= limit:
                 break
         return picked
+
+    @staticmethod
+    def _evidence_from_video(video: Video) -> CommentEvidence:
+        """没有抓详情时，至少把标题之外的简介/标签带进素材。"""
+
+        return CommentEvidence(
+            description=str(getattr(video, "description", "") or ""),
+            tags=str(getattr(video, "tags", "") or ""),
+        )
 
     async def _collect_detail(self, video: Video) -> Tuple[List[str], List[str], str]:
         """抓取弹幕 / 热门评论 / 字幕（失败时返回空）。"""
@@ -2065,6 +2161,128 @@ class BilibiliInterestSharePlugin(MaiBotPlugin):
         if stream_id:
             await self._send_text(stream_id, text)
         return True, text, 2
+
+    # -- 评论 ----------------------------------------------------------
+
+    @Command(
+        "bili_comment_status",
+        description="查看 B 站评论开关、额度与最近记录",
+        pattern=r"^/bili-comment-status",
+    )
+    async def cmd_comment_status(self, **kwargs: Any) -> Tuple[bool, str, int]:
+        stream_id = _stream_id_of(kwargs)
+        text = self._comment.status_text() if self._comment is not None else "评论模块未加载。"
+        if stream_id:
+            await self._send_text(stream_id, text)
+        return True, text, 2
+
+    @Command(
+        "bili_comment_pause",
+        description="暂停 B 站评论（仍会分享视频）",
+        pattern=r"^/bili-comment-pause",
+    )
+    async def cmd_comment_pause(self, **kwargs: Any) -> Tuple[bool, str, int]:
+        stream_id = _stream_id_of(kwargs)
+        if self._comment is not None:
+            self._comment.pause("manual")
+        text = "已暂停 B 站评论，视频分享不受影响。"
+        if stream_id:
+            await self._send_text(stream_id, text)
+        return True, text, 2
+
+    @Command(
+        "bili_comment_resume",
+        description="恢复 B 站评论",
+        pattern=r"^/bili-comment-resume",
+    )
+    async def cmd_comment_resume(self, **kwargs: Any) -> Tuple[bool, str, int]:
+        stream_id = _stream_id_of(kwargs)
+        if self._comment is not None:
+            self._comment.resume()
+        text = "已恢复 B 站评论。"
+        if stream_id:
+            await self._send_text(stream_id, text)
+        return True, text, 2
+
+    @Command(
+        "bili_comment_ack",
+        description="人工核对某条评论的未知结果后解除阻塞",
+        pattern=r"^/bili-comment-ack\s*(?P<bvid>.*)$",
+    )
+    async def cmd_comment_ack(self, **kwargs: Any) -> Tuple[bool, str, int]:
+        stream_id = _stream_id_of(kwargs)
+        bvid = self._command_arg(kwargs, "bvid").strip()
+        if not bvid:
+            text = "用法：/bili-comment-ack BV号"
+        elif self._comment is None:
+            text = "评论模块未加载。"
+        else:
+            result = self._comment.ack(bvid)
+            if result.get("ok"):
+                text = f"已解除阻塞：{bvid}（该视频不会重发评论）"
+            elif result.get("reason") == "no_record":
+                text = f"没有 {bvid} 的评论记录。"
+            else:
+                text = f"核对失败：{result.get('reason')}"
+        if stream_id:
+            await self._send_text(stream_id, text)
+        return True, text, 2
+
+    @Command(
+        "bili_comment_preview",
+        description="为指定 BV 号生成一条评论草稿（只预览，不发到 B 站）",
+        pattern=r"^/bili-comment-preview\s*(?P<bvid>.*)$",
+    )
+    async def cmd_comment_preview(self, **kwargs: Any) -> Tuple[bool, str, int]:
+        stream_id = _stream_id_of(kwargs)
+        bvid = self._command_arg(kwargs, "bvid").strip()
+        text = await self.preview_comment(bvid)
+        if stream_id:
+            await self._send_text(stream_id, text)
+        return True, text, 2
+
+    async def preview_comment(self, bvid: str) -> str:
+        """给一个 BV 号现场生成评论草稿，用于试语气（不发任何写请求）。"""
+
+        config = self.config
+        if self._comment is None or self._client is None:
+            return "评论模块还没加载好，稍后再试。"
+        if not config.comment.enabled:
+            return "评论总开关没开：先在插件配置里打开「B站评论 → 启用评论」。"
+        code = (bvid or "").strip()
+        if not code.upper().startswith("BV"):
+            return "用法：/bili-comment-preview BV号"
+        try:
+            detail = await self._client.fetch_view(code)
+        except BilibiliError as exc:
+            return f"取视频信息失败：{exc}"
+        video = Video(
+            bvid=code,
+            aid=int(detail.get("aid") or 0),
+            duration=int(detail.get("duration") or 0),
+            title=str(detail.get("title") or ""),
+        )
+        danmaku, comments, subtitle = await self._collect_detail(video)
+        evidence = CommentEvidence(
+            danmaku=danmaku,
+            comments=comments,
+            subtitle=subtitle,
+            description=str(getattr(video, "description", "") or ""),
+            tags=str(getattr(video, "tags", "") or ""),
+        )
+        draft = await self._comment.compose(video, evidence, dry_run=True)
+        lines = [
+            f"【评论草稿】{video.title or code}",
+            f"素材充足度：{evidence.richness()}/5"
+            f"（弹幕 {len(danmaku)} / 热评 {len(comments)} / 字幕 {len(subtitle)} 字）",
+            f"校验：{'通过' if draft.get('ok') else '未通过（' + str(draft.get('reason')) + '）'}",
+            "",
+            str(draft.get("text") or "（模型没给出可用的评论）"),
+        ]
+        if code and draft.get("ok"):
+            lines.append("")
+            lines.append(f"（只是草稿，没有发到 B 站；真要发需要在配置里打开「真的发布」）")
+        return "\n".join(lines)
 
     # -- 文本输出 ------------------------------------------------------
 

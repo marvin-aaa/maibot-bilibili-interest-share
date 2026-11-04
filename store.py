@@ -65,6 +65,7 @@ class SeenStore:
         self._runs: List[Dict[str, Any]] = []
         self._streams: Dict[str, Dict[str, Any]] = {}
         self._cooldowns: Dict[str, float] = {}
+        self._comments: Dict[str, Dict[str, Any]] = {}
         self._auto_interests: Dict[str, List[str]] = {}
         self._meta: Dict[str, Any] = {}
         self._loaded = False
@@ -128,6 +129,11 @@ class SeenStore:
         meta = data.get("meta")
         if isinstance(meta, dict):
             self._meta = dict(meta)
+        comments = data.get("comments")
+        if isinstance(comments, dict):
+            for bvid, record in comments.items():
+                if isinstance(record, dict):
+                    self._comments[str(bvid)] = dict(record)
         self._prune()
 
     def save(self) -> None:
@@ -138,6 +144,7 @@ class SeenStore:
             "runs": self._runs[-_MAX_RUN_HISTORY:],
             "streams": self._streams,
             "cooldowns": self._cooldowns,
+            "comments": self._comments,
             "auto_interests": self._auto_interests,
             "meta": self._meta,
         }
@@ -172,6 +179,14 @@ class SeenStore:
             )
             for bvid, _record in ordered[: len(self._videos) - self.max_records]:
                 self._videos.pop(bvid, None)
+        # 评论记录跟已刷名单同样的保留期，避免 state.json 无限增长
+        expired_comments = [
+            bvid
+            for bvid, record in self._comments.items()
+            if now - float(record.get("at") or record.get("attempted_at") or 0.0) > ttl
+        ]
+        for bvid in expired_comments:
+            self._comments.pop(bvid, None)
 
     def is_seen(self, bvid: str, *, now: Optional[float] = None) -> bool:
         """视频是否已经在「已刷名单」里（名单内的不再自动分享）。"""
@@ -336,6 +351,112 @@ class SeenStore:
         """写一条通用元信息。"""
 
         self._meta[str(key)] = value
+
+    # ------------------------------------------------------------------
+    # 评论：记录 / 额度 / 暂停
+    # ------------------------------------------------------------------
+
+    def get_comment(self, bvid: str) -> Optional[Dict[str, Any]]:
+        """取某个视频的评论记录；没有返回 None。"""
+
+        record = self._comments.get(str(bvid))
+        return dict(record) if isinstance(record, dict) else None
+
+    def mark_comment_attempt(
+        self,
+        bvid: str,
+        *,
+        text: str,
+        aid: int = 0,
+        now: Optional[float] = None,
+    ) -> None:
+        """发送前落意图：状态置 pending，并累计当日次数与上次发送时间。"""
+
+        now = time.time() if now is None else now
+        record = self._comments.setdefault(str(bvid), {})
+        record.update(
+            {
+                "bvid": str(bvid),
+                "aid": int(aid or record.get("aid") or 0),
+                "text": str(text or ""),
+                "status": "pending",
+                "attempted_at": now,
+                "at": now,
+                "attempts": int(record.get("attempts") or 0) + 1,
+            }
+        )
+        self._meta["comment_last_attempt_at"] = now
+        day = time.strftime("%Y-%m-%d", time.localtime(now))
+        if self._meta.get("comment_day") != day:
+            self._meta["comment_day"] = day
+            self._meta["comment_day_count"] = 0
+        self._meta["comment_day_count"] = int(self._meta.get("comment_day_count") or 0) + 1
+
+    def mark_comment_result(
+        self,
+        bvid: str,
+        *,
+        status: str,
+        text: str = "",
+        rpid: str = "",
+        reason: str = "",
+        stream_id: str = "",
+        published: bool = False,
+        now: Optional[float] = None,
+    ) -> None:
+        """落结果：published / draft / rejected / unknown / paused / acked_unknown。"""
+
+        now = time.time() if now is None else now
+        record = self._comments.setdefault(str(bvid), {})
+        record.update(
+            {
+                "bvid": str(bvid),
+                "text": str(text or record.get("text") or ""),
+                "status": str(status),
+                "reason": str(reason or ""),
+                "at": now,
+            }
+        )
+        if rpid:
+            record["rpid"] = str(rpid)
+        if stream_id:
+            record["stream_id"] = str(stream_id)
+        if published:
+            record["published"] = True
+        # 草稿不占用「上次发送时间」，只有真的尝试过发送才计时
+        if status in {"draft", "rejected"} and not text:
+            record.pop("attempted_at", None)
+
+    def comment_count_today(self, *, now: Optional[float] = None) -> int:
+        """今日已尝试发送的评论条数（跨天自动归零）。"""
+
+        now = time.time() if now is None else now
+        day = time.strftime("%Y-%m-%d", time.localtime(now))
+        if self._meta.get("comment_day") != day:
+            return 0
+        return int(self._meta.get("comment_day_count") or 0)
+
+    def last_comment_attempt_at(self) -> float:
+        try:
+            return float(self._meta.get("comment_last_attempt_at") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def comment_pause_reason(self) -> str:
+        return str(self._meta.get("comment_pause") or "")
+
+    def set_comment_pause(self, reason: str) -> None:
+        self._meta["comment_pause"] = str(reason or "paused")
+
+    def clear_comment_pause(self) -> None:
+        self._meta.pop("comment_pause", None)
+
+    def recent_comments(self, limit: int = 3) -> List[Dict[str, Any]]:
+        """按时间倒序返回最近几条评论记录。"""
+
+        items = [dict(record) for record in self._comments.values() if isinstance(record, dict)]
+        items.sort(key=lambda item: float(item.get("at") or 0.0), reverse=True)
+        return items[: max(1, int(limit))]
 
     # ------------------------------------------------------------------
     # 运行记录

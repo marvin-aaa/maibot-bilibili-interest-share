@@ -5,6 +5,30 @@
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 `_manifest.json` 的 `version` 与 `config.py` 里的 `config_version` 始终一致。
 
+## [2.1.0] - 2026-11-04
+
+新增「B 站评论」：对已经入选、准备分享的视频，用同一个人设口吻在视频下写一条一级评论。默认全关，并且默认只出草稿不发出去。
+
+### 新增
+
+- **`[comment]` 配置节**：`enabled`（总开关）、`publish_enabled`（真的发布）、`style_prompt`（人设之外的额外语气 Prompt，默认留空）、`min_interest`、`max_chars`、`min_interval_seconds`（默认 45 分钟）、`daily_limit`（默认 10 条）、`active_hours`、`min_evidence`、`require_frames`、`share_when_comment_fails`、`block_patterns`。
+- **`comment.py`**：草稿生成（人设 + 字幕/简介/弹幕/热评/画面）、内容依据回查、硬规则过滤、发布与结果分类集中在一个模块里，`plugin.py` 只留调用点，便于上游更新后 rebase。
+- **四道闸**：素材充足度 → 模型必须给出可回查的 `evidence` → 链接/@/联系方式/求三连/私聊称呼一律拒绝 → 额度/最小间隔/时段。
+- **发送语义**：先落发送意图再单次 POST；超时或异常记 `unknown` 并暂停评论；`-412` 风控、`-101/-111` 登录失效同样暂停，等人工处理。
+- **指令**：`/bili-comment-status`、`/bili-comment-pause`、`/bili-comment-resume`、`/bili-comment-ack BV号`、`/bili-comment-preview BV号`（现场生成草稿试语气，不发任何写请求）。
+- `bilibili.py`：新增 `post_comment()` / `csrf_token()` / `fetch_self_mid()`，评论接口的返回码原样交给上层分类。
+- `store.py`：`state.json` 新增 `comments` 段与 `meta` 里的当日计数、上次发送时间、暂停原因。
+
+### 变更
+
+- `_pick_candidates()` 现在返回 `(打分, 判断, 评论素材)`，把弹幕/热评/字幕/画面描述一并带出，发评论不用重复抓取。
+- 自动分享顺序改为「先评论、再分享」；评论失败是否继续分享由 `share_when_comment_fails` 决定（默认继续）。
+
+### 注意
+
+- 评论会公开挂在 B 站、且本版不支持自动撤回，所以默认 `publish_enabled = false`；建议先开草稿跑几天看质量，再打开真实发布。
+- 评论会拦掉人设里的名字与别名，私聊里的称呼可在 `privacy_patterns` 里补充，普通禁用词走 `block_patterns`。
+
 ## [2.0.0] - 2026-11-01
 
 上一次发布（v1.1.2）之后积累的全部改动合并成这一个版本。这一轮的主题是「配置能自己看懂、兴趣能自己管、登录不用折腾」：加上 B 站扫码登录、配置项全部中文化、自动兴趣看得见也改得动、README 整体重写，并在实机验收中顺带修掉了几个只有在真实群聊里才会暴露的问题。
