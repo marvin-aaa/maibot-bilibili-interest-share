@@ -1462,7 +1462,16 @@ class BilibiliInterestSharePlugin(MaiBotPlugin):
         if send is None:
             return False
         try:
-            result = await send.text(text, stream_id)
+            # 同步进 Maisaka 内部历史：否则插件直发的消息只会落库，
+            # 不进 planner 会话历史，模型会否认自己发过（2026-11-04 排查）。
+            # maisaka_source_kind 必须是 guided_reply，否则宿主不会标记
+            # is_self_message=true，历史里会被当成另一个说话人。
+            result = await send.text(
+                text,
+                stream_id,
+                sync_to_maisaka_history=True,
+                maisaka_source_kind="guided_reply",
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("发送消息失败（%s）：%s", stream_id, exc)
             return False
