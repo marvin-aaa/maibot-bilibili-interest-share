@@ -42,7 +42,7 @@ class PluginSectionConfig(PluginConfigBase):
         json_schema_extra={"label": "启用插件"},
     )
     config_version: str = Field(
-        default="2.1.1",
+        default="2.1.2",
         description="配置版本（由插件维护，请勿手动修改）",
         json_schema_extra={"label": "配置版本"},
     )
@@ -755,6 +755,16 @@ class CommentConfig(PluginConfigBase):
         le=300,
         description="单条评论的最大字数",
         json_schema_extra={"label": "评论字数上限"},
+    )
+    draft_max_tokens: int = Field(
+        default=2000,
+        ge=400,
+        le=8000,
+        description=(
+            "生成草稿时给模型的输出预算。推理模型会先思考再回答，预算太小会把正文挤掉，"
+            "表现为「模型没有输出」；偏小的模型（无思考）可以调低"
+        ),
+        json_schema_extra={"label": "草稿输出预算"},
     )
     min_interval_seconds: int = Field(
         default=2700,

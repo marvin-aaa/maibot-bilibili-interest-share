@@ -34,6 +34,11 @@ _MAX_COMMENT_CHARS = 160
 _EVIDENCE_FREE_MAX_CHARS = 60
 # 与弹幕逐字重合的判定长度：≥ 这个长度的整句出现在评论里就算抄弹幕
 _DANMAKU_COPY_MIN_CHARS = 12
+# 草稿生成的输出预算：模型是「先想后答」的推理模型，max_tokens 同时喂思考和正文。
+# 实测给 400 时思考把额度吃光、正文为空（finish=length, content 0），
+# 给 1200 仍可能被截断，所以默认给 2000，重试时再翻到 3500。
+_DRAFT_MAX_TOKENS = 2000
+_DRAFT_RETRY_MAX_TOKENS = 3500
 
 _URL_RE = re.compile(r"(https?://|www\.|b23\.tv|bilibili\.com|BV[0-9A-Za-z]{10})", re.I)
 _MENTION_RE = re.compile(r"[@＠]\S")
@@ -410,14 +415,31 @@ class CommentService:
             style_prompt=getattr(cfg, "style_prompt", ""),
             max_chars=int(cfg.max_chars),
         )
-        text = await self._judge.generate_text(prompt, max_tokens=400)
-        if not (text or "").strip():
-            logger.warning("评论草稿生成失败：模型没有输出 %s", getattr(video, "bvid", ""))
-            return self._transient_result(score01, dry_run)
-        draft = parse_draft(text)
         privacy_terms = self._privacy_terms()
+        bvid = getattr(video, "bvid", "")
+        budget = int(cfg.draft_max_tokens or _DRAFT_MAX_TOKENS)
+        call_prompt = prompt
+        draft: Optional[Dict[str, Any]] = None
         ok, reason, body = (False, "unparsable", "")
-        if draft is not None:
+        for attempt in range(2):
+            text = await self._judge.generate_text(call_prompt, max_tokens=budget)
+            if not (text or "").strip():
+                # 推理模型把预算吃光时正文会是空的：加大预算再试一次
+                logger.warning(
+                    "评论草稿第 %s 次无正文（max_tokens=%s）%s", attempt + 1, budget, bvid
+                )
+                budget = max(_DRAFT_RETRY_MAX_TOKENS, budget * 2)
+                call_prompt = prompt + "\n\n请直接输出 JSON，不要输出思考过程。"
+                continue
+            draft = parse_draft(text)
+            if draft is None:
+                logger.warning(
+                    "评论草稿第 %s 次无法解析（可能被截断，max_tokens=%s）%s",
+                    attempt + 1, budget, bvid,
+                )
+                budget = max(_DRAFT_RETRY_MAX_TOKENS, budget * 2)
+                call_prompt = prompt + "\n\n上一次的输出为空或被截断，请直接输出一个完整的 JSON 对象。"
+                continue
             ok, reason, body = validate_draft(
                 draft,
                 evidence,
@@ -425,27 +447,17 @@ class CommentService:
                 extra_block_words=cfg.block_patterns,
                 privacy_words=privacy_terms,
             )
-        if not ok:
-            # 回炉一次：把不合格原因直接反馈给模型
-            retry_prompt = (
+            if ok:
+                break
+            # 内容不合格：把原因回炉给模型，预算同样放大（避免又因思考被截断）
+            budget = max(_DRAFT_RETRY_MAX_TOKENS, budget * 2)
+            call_prompt = (
                 prompt
                 + f"\n\n上一次的草稿不合格，原因：{reason}。请据此重写，仍然只输出 JSON。"
             )
-            text = await self._judge.generate_text(retry_prompt, max_tokens=400)
-            if not (text or "").strip():
-                logger.warning(
-                    "评论草稿重试仍无输出 %s", getattr(video, "bvid", "")
-                )
-                return self._transient_result(score01, dry_run)
-            draft = parse_draft(text)
-            if draft is not None:
-                ok, reason, body = validate_draft(
-                    draft,
-                    evidence,
-                    max_chars=int(cfg.max_chars),
-                    extra_block_words=cfg.block_patterns,
-                    privacy_words=privacy_terms,
-                )
+        if draft is None:
+            logger.warning("评论草稿生成失败：两次都没有可用输出 %s", bvid)
+            return self._transient_result(score01, dry_run)
         result = {
             "ok": ok,
             "reason": reason,

@@ -5,6 +5,15 @@
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 `_manifest.json` 的 `version` 与 `config.py` 里的 `config_version` 始终一致。
 
+## [2.1.2] - 2026-11-04
+
+修复实际测试中暴露的问题：预览评论草稿时报「未通过（llm_unavailable）」，提示里写「模型没给出可用的评论」。
+
+### 修复
+
+- **草稿输出预算太小**：`generate_text()` 只给了 `max_tokens=400`，而当前模型是「先想后答」的推理模型，思考内容也吃这份预算。实测同一条素材：`max_tokens=400` → `finish_reason=length`、思考 1114 token、正文 **0 字**；给 1200 仍可能被截断。现在默认 2000（新增 `[comment].draft_max_tokens` 可调），空输出或解析失败时再翻倍重试一次（3500）。
+- 草稿重试策略合并成一次循环：空正文 / JSON 被截断 / 校验不过，三种情况各自带着更大的预算重试一次，最终仍失败才判为瞬时故障（不落库、下一轮还能试）。
+
 ## [2.1.1] - 2026-11-04
 
 2.1.0 的修复版：按代码审阅意见修掉 4 个必修问题、6 个健壮性问题，以及 9 处小瑕疵。

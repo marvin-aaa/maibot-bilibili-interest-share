@@ -157,6 +157,7 @@ class FakeJudge:
         self.calls = 0
         self.identity_terms = list(identity_terms or [])
         self.empty = empty
+        self.budgets: List[int] = []
 
     def persona_block(self) -> str:
         return "人设：安静的记录者"
@@ -166,6 +167,7 @@ class FakeJudge:
 
     async def generate_text(self, prompt, *, task_name: str = "", max_tokens: int = 800) -> str:
         self.calls += 1
+        self.budgets.append(max_tokens)
         if self.empty:
             return ""
         return json.dumps(self.payload, ensure_ascii=False)
@@ -352,7 +354,9 @@ async def test_llm_empty_output_is_transient(tmp_path) -> None:
     result = await service.maybe_comment(FakeVideo(), _evidence())
     assert result["status"] == "skip" and result["reason"] == "llm_unavailable"
     assert store.get_comment("BV1xx411c7mD") is None
-    assert judge.calls == 1  # 空输出直接返回，不浪费第二次调用
+    # 空输出会带着更大的预算重试一次，仍失败才判瞬时故障
+    assert judge.calls == 2
+    assert judge.budgets[1] > judge.budgets[0]
 
 
 def test_single_char_privacy_term_only_matches_standalone() -> None:
@@ -399,3 +403,22 @@ async def test_ack_does_not_clear_account_level_pause(tmp_path) -> None:
     assert result["ok"] is True
     assert result.get("pause_kept")
     assert store.comment_pause_reason()  # 仍然暂停
+
+
+@pytest.mark.asyncio
+async def test_empty_then_success_recovers(tmp_path) -> None:
+    """第一次被思考挤空、重试给足预算后拿到正文 → 正常产出草稿。"""
+
+    class FlakyJudge(FakeJudge):
+        async def generate_text(self, prompt, *, task_name: str = "", max_tokens: int = 800) -> str:
+            self.calls += 1
+            self.budgets.append(max_tokens)
+            if self.calls == 1:
+                return ""
+            return json.dumps(self.payload, ensure_ascii=False)
+
+    judge = FlakyJudge()
+    service, store = _service(tmp_path, cfg=_cfg(publish_enabled=False), judge=judge)
+    result = await service.maybe_comment(FakeVideo(), _evidence())
+    assert result["status"] == "draft"
+    assert judge.budgets[1] > judge.budgets[0]
